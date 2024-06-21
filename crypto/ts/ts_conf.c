@@ -1,71 +1,23 @@
-/* crypto/ts/ts_conf.c */
 /*
- * Written by Zoltan Glozik (zglozik@stones.com) for the OpenSSL project
- * 2002.
+ * Copyright 2006-2023 The OpenSSL Project Authors. All Rights Reserved.
+ *
+ * Licensed under the Apache License 2.0 (the "License").  You may not use
+ * this file except in compliance with the License.  You can obtain a copy
+ * in the file LICENSE in the source distribution or at
+ * https://www.openssl.org/source/license.html
  */
-/* ====================================================================
- * Copyright (c) 2006 The OpenSSL Project.  All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- *
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer.
- *
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in
- *    the documentation and/or other materials provided with the
- *    distribution.
- *
- * 3. All advertising materials mentioning features or use of this
- *    software must display the following acknowledgment:
- *    "This product includes software developed by the OpenSSL Project
- *    for use in the OpenSSL Toolkit. (http://www.OpenSSL.org/)"
- *
- * 4. The names "OpenSSL Toolkit" and "OpenSSL Project" must not be used to
- *    endorse or promote products derived from this software without
- *    prior written permission. For written permission, please contact
- *    licensing@OpenSSL.org.
- *
- * 5. Products derived from this software may not be called "OpenSSL"
- *    nor may "OpenSSL" appear in their names without prior written
- *    permission of the OpenSSL Project.
- *
- * 6. Redistributions of any form whatsoever must retain the following
- *    acknowledgment:
- *    "This product includes software developed by the OpenSSL Project
- *    for use in the OpenSSL Toolkit (http://www.OpenSSL.org/)"
- *
- * THIS SOFTWARE IS PROVIDED BY THE OpenSSL PROJECT ``AS IS'' AND ANY
- * EXPRESSED OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
- * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE OpenSSL PROJECT OR
- * ITS CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
- * NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
- * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
- * STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED
- * OF THE POSSIBILITY OF SUCH DAMAGE.
- * ====================================================================
- *
- * This product includes cryptographic software written by Eric Young
- * (eay@cryptsoft.com).  This product includes software written by Tim
- * Hudson (tjh@cryptsoft.com).
- *
- */
+
+/* We need to use some engine deprecated APIs */
+#define OPENSSL_SUPPRESS_DEPRECATED
 
 #include <string.h>
 
 #include <openssl/crypto.h>
 #include "internal/cryptlib.h"
 #include <openssl/pem.h>
-#ifndef OPENSSL_NO_ENGINE
-# include <openssl/engine.h>
-#endif
+#include <openssl/engine.h>
 #include <openssl/ts.h>
+#include <openssl/conf_api.h>
 
 /* Macro definitions for the configuration file. */
 #define BASE_SECTION                    "tsa"
@@ -75,6 +27,7 @@
 #define ENV_SIGNER_CERT                 "signer_cert"
 #define ENV_CERTS                       "certs"
 #define ENV_SIGNER_KEY                  "signer_key"
+#define ENV_SIGNER_DIGEST               "signer_digest"
 #define ENV_DEFAULT_POLICY              "default_policy"
 #define ENV_OTHER_POLICIES              "other_policies"
 #define ENV_DIGESTS                     "digests"
@@ -88,6 +41,7 @@
 #define ENV_CLOCK_PRECISION_DIGITS      "clock_precision_digits"
 #define ENV_VALUE_YES                   "yes"
 #define ENV_VALUE_NO                    "no"
+#define ENV_ESS_CERT_ID_ALG             "ess_cert_id_alg"
 
 /* Function definitions for certificate and key loading. */
 
@@ -101,7 +55,7 @@ X509 *TS_CONF_load_cert(const char *file)
     x = PEM_read_bio_X509_AUX(cert, NULL, NULL, NULL);
  end:
     if (x == NULL)
-        TSerr(TS_F_TS_CONF_LOAD_CERT, TS_R_CANNOT_LOAD_CERT);
+        ERR_raise(ERR_LIB_TS, TS_R_CANNOT_LOAD_CERT);
     BIO_free(cert);
     return x;
 }
@@ -121,14 +75,19 @@ STACK_OF(X509) *TS_CONF_load_certs(const char *file)
     allcerts = PEM_X509_INFO_read_bio(certs, NULL, NULL, NULL);
     for (i = 0; i < sk_X509_INFO_num(allcerts); i++) {
         X509_INFO *xi = sk_X509_INFO_value(allcerts, i);
-        if (xi->x509) {
-            sk_X509_push(othercerts, xi->x509);
+
+        if (xi->x509 != NULL) {
+            if (!X509_add_cert(othercerts, xi->x509, X509_ADD_FLAG_DEFAULT)) {
+                OSSL_STACK_OF_X509_free(othercerts);
+                othercerts = NULL;
+                goto end;
+            }
             xi->x509 = NULL;
         }
     }
  end:
     if (othercerts == NULL)
-        TSerr(TS_F_TS_CONF_LOAD_CERTS, TS_R_CANNOT_LOAD_CERT);
+        ERR_raise(ERR_LIB_TS, TS_R_CANNOT_LOAD_CERT);
     sk_X509_INFO_pop_free(allcerts, X509_INFO_free);
     BIO_free(certs);
     return othercerts;
@@ -144,7 +103,7 @@ EVP_PKEY *TS_CONF_load_key(const char *file, const char *pass)
     pkey = PEM_read_bio_PrivateKey(key, NULL, NULL, (char *)pass);
  end:
     if (pkey == NULL)
-        TSerr(TS_F_TS_CONF_LOAD_KEY, TS_R_CANNOT_LOAD_KEY);
+        ERR_raise(ERR_LIB_TS, TS_R_CANNOT_LOAD_KEY);
     BIO_free(key);
     return pkey;
 }
@@ -153,14 +112,12 @@ EVP_PKEY *TS_CONF_load_key(const char *file, const char *pass)
 
 static void ts_CONF_lookup_fail(const char *name, const char *tag)
 {
-    TSerr(TS_F_TS_CONF_LOOKUP_FAIL, TS_R_VAR_LOOKUP_FAILURE);
-    ERR_add_error_data(3, name, "::", tag);
+    ERR_raise_data(ERR_LIB_TS, TS_R_VAR_LOOKUP_FAILURE, "%s::%s", name, tag);
 }
 
 static void ts_CONF_invalid(const char *name, const char *tag)
 {
-    TSerr(TS_F_TS_CONF_INVALID, TS_R_VAR_BAD_VALUE);
-    ERR_add_error_data(3, name, "::", tag);
+    ERR_raise_data(ERR_LIB_TS, TS_R_VAR_BAD_VALUE, "%s::%s", name, tag);
 }
 
 const char *TS_CONF_get_tsa_section(CONF *conf, const char *section)
@@ -225,10 +182,9 @@ int TS_CONF_set_default_engine(const char *name)
     ret = 1;
 
  err:
-    if (!ret) {
-        TSerr(TS_F_TS_CONF_SET_DEFAULT_ENGINE, TS_R_COULD_NOT_SET_ENGINE);
-        ERR_add_error_data(2, "engine:", name);
-    }
+    if (!ret)
+        ERR_raise_data(ERR_LIB_TS, TS_R_COULD_NOT_SET_ENGINE,
+                       "engine:%s", name);
     ENGINE_free(e);
     return ret;
 }
@@ -277,7 +233,7 @@ int TS_CONF_set_certs(CONF *conf, const char *section, const char *certs,
  end:
     ret = 1;
  err:
-    sk_X509_pop_free(certs_obj, X509_free);
+    OSSL_STACK_OF_X509_free(certs_obj);
     return ret;
 }
 
@@ -304,14 +260,39 @@ int TS_CONF_set_signer_key(CONF *conf, const char *section,
     return ret;
 }
 
+int TS_CONF_set_signer_digest(CONF *conf, const char *section,
+                              const char *md, TS_RESP_CTX *ctx)
+{
+    int ret = 0;
+    const EVP_MD *sign_md = NULL;
+    if (md == NULL)
+        md = NCONF_get_string(conf, section, ENV_SIGNER_DIGEST);
+    if (md == NULL) {
+        ts_CONF_lookup_fail(section, ENV_SIGNER_DIGEST);
+        goto err;
+    }
+    sign_md = EVP_get_digestbyname(md);
+    if (sign_md == NULL) {
+        ts_CONF_invalid(section, ENV_SIGNER_DIGEST);
+        goto err;
+    }
+    if (!TS_RESP_CTX_set_signer_digest(ctx, sign_md))
+        goto err;
+
+    ret = 1;
+ err:
+    return ret;
+}
+
 int TS_CONF_set_def_policy(CONF *conf, const char *section,
                            const char *policy, TS_RESP_CTX *ctx)
 {
     int ret = 0;
     ASN1_OBJECT *policy_obj = NULL;
-    if (!policy)
+
+    if (policy == NULL)
         policy = NCONF_get_string(conf, section, ENV_DEFAULT_POLICY);
-    if (!policy) {
+    if (policy == NULL) {
         ts_CONF_lookup_fail(section, ENV_DEFAULT_POLICY);
         goto err;
     }
@@ -435,7 +416,7 @@ int TS_CONF_set_accuracy(CONF *conf, const char *section, TS_RESP_CTX *ctx)
     return ret;
 }
 
-int TS_CONF_set_clock_precision_digits(CONF *conf, const char *section,
+int TS_CONF_set_clock_precision_digits(const CONF *conf, const char *section,
                                        TS_RESP_CTX *ctx)
 {
     int ret = 0;
@@ -444,9 +425,7 @@ int TS_CONF_set_clock_precision_digits(CONF *conf, const char *section,
     /*
      * If not specified, set the default value to 0, i.e. sec precision
      */
-    if (!NCONF_get_number_e(conf, section, ENV_CLOCK_PRECISION_DIGITS,
-                            &digits))
-        digits = 0;
+    digits = _CONF_get_number(conf, section, ENV_CLOCK_PRECISION_DIGITS);
     if (digits < 0 || digits > TS_MAX_CLOCK_PRECISION_DIGITS) {
         ts_CONF_invalid(section, ENV_CLOCK_PRECISION_DIGITS);
         goto err;
@@ -492,4 +471,28 @@ int TS_CONF_set_ess_cert_id_chain(CONF *conf, const char *section,
 {
     return ts_CONF_add_flag(conf, section, ENV_ESS_CERT_ID_CHAIN,
                             TS_ESS_CERT_ID_CHAIN, ctx);
+}
+
+int TS_CONF_set_ess_cert_id_digest(CONF *conf, const char *section,
+                                   TS_RESP_CTX *ctx)
+{
+    int ret = 0;
+    const EVP_MD *cert_md = NULL;
+    const char *md = NCONF_get_string(conf, section, ENV_ESS_CERT_ID_ALG);
+
+    if (md == NULL)
+        md = "sha256";
+
+    cert_md = EVP_get_digestbyname(md);
+    if (cert_md == NULL) {
+        ts_CONF_invalid(section, ENV_ESS_CERT_ID_ALG);
+        goto err;
+    }
+
+    if (!TS_RESP_CTX_set_ess_cert_id_digest(ctx, cert_md))
+        goto err;
+
+    ret = 1;
+err:
+    return ret;
 }

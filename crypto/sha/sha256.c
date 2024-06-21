@@ -1,9 +1,18 @@
-/* crypto/sha/sha256.c */
-/* ====================================================================
- * Copyright (c) 2004 The OpenSSL Project.  All rights reserved
- * according to the OpenSSL license [found in ../../LICENSE].
- * ====================================================================
+/*
+ * Copyright 2004-2023 The OpenSSL Project Authors. All Rights Reserved.
+ *
+ * Licensed under the Apache License 2.0 (the "License").  You may not use
+ * this file except in compliance with the License.  You can obtain a copy
+ * in the file LICENSE in the source distribution or at
+ * https://www.openssl.org/source/license.html
  */
+
+/*
+ * SHA256 low level APIs are deprecated for public use, but still ok for
+ * internal use.
+ */
+#include "internal/deprecated.h"
+
 #include <openssl/opensslconf.h>
 
 #include <stdlib.h>
@@ -12,6 +21,8 @@
 #include <openssl/crypto.h>
 #include <openssl/sha.h>
 #include <openssl/opensslv.h>
+#include "internal/endian.h"
+#include "crypto/sha.h"
 
 int SHA224_Init(SHA256_CTX *c)
 {
@@ -43,32 +54,11 @@ int SHA256_Init(SHA256_CTX *c)
     return 1;
 }
 
-unsigned char *SHA224(const unsigned char *d, size_t n, unsigned char *md)
+int ossl_sha256_192_init(SHA256_CTX *c)
 {
-    SHA256_CTX c;
-    static unsigned char m[SHA224_DIGEST_LENGTH];
-
-    if (md == NULL)
-        md = m;
-    SHA224_Init(&c);
-    SHA256_Update(&c, d, n);
-    SHA256_Final(md, &c);
-    OPENSSL_cleanse(&c, sizeof(c));
-    return (md);
-}
-
-unsigned char *SHA256(const unsigned char *d, size_t n, unsigned char *md)
-{
-    SHA256_CTX c;
-    static unsigned char m[SHA256_DIGEST_LENGTH];
-
-    if (md == NULL)
-        md = m;
-    SHA256_Init(&c);
-    SHA256_Update(&c, d, n);
-    SHA256_Final(md, &c);
-    OPENSSL_cleanse(&c, sizeof(c));
-    return (md);
+    SHA256_Init(c);
+    c->md_len = SHA256_192_DIGEST_LENGTH;
+    return 1;
 }
 
 int SHA224_Update(SHA256_CTX *c, const void *data, size_t len)
@@ -92,14 +82,18 @@ int SHA224_Final(unsigned char *md, SHA256_CTX *c)
  * default: case below covers for it. It's not clear however if it's
  * permitted to truncate to amount of bytes not divisible by 4. I bet not,
  * but if it is, then default: case shall be extended. For reference.
- * Idea behind separate cases for pre-defined lenghts is to let the
+ * Idea behind separate cases for pre-defined lengths is to let the
  * compiler decide if it's appropriate to unroll small loops.
  */
 #define HASH_MAKE_STRING(c,s)   do {    \
         unsigned long ll;               \
         unsigned int  nn;               \
         switch ((c)->md_len)            \
-        {   case SHA224_DIGEST_LENGTH:  \
+        {   case SHA256_192_DIGEST_LENGTH: \
+                for (nn=0;nn<SHA256_192_DIGEST_LENGTH/4;nn++)   \
+                {   ll=(c)->h[nn]; (void)HOST_l2c(ll,(s));   }  \
+                break;                  \
+            case SHA224_DIGEST_LENGTH:  \
                 for (nn=0;nn<SHA224_DIGEST_LENGTH/4;nn++)       \
                 {   ll=(c)->h[nn]; (void)HOST_l2c(ll,(s));   }  \
                 break;                  \
@@ -122,12 +116,16 @@ int SHA224_Final(unsigned char *md, SHA256_CTX *c)
 #define HASH_BLOCK_DATA_ORDER   sha256_block_data_order
 #ifndef SHA256_ASM
 static
-#endif
+#else
+# ifdef INCLUDE_C_SHA256
+void sha256_block_data_order_c(SHA256_CTX *ctx, const void *in, size_t num);
+# endif /* INCLUDE_C_SHA256 */
+#endif /* SHA256_ASM */
 void sha256_block_data_order(SHA256_CTX *ctx, const void *in, size_t num);
 
-#include "internal/md32_common.h"
+#include "crypto/md32_common.h"
 
-#ifndef SHA256_ASM
+#if !defined(SHA256_ASM) || defined(INCLUDE_C_SHA256)
 static const SHA_LONG K256[64] = {
     0x428a2f98UL, 0x71374491UL, 0xb5c0fbcfUL, 0xe9b5dba5UL,
     0x3956c25bUL, 0x59f111f1UL, 0x923f82a4UL, 0xab1c5ed5UL,
@@ -147,18 +145,63 @@ static const SHA_LONG K256[64] = {
     0x90befffaUL, 0xa4506cebUL, 0xbef9a3f7UL, 0xc67178f2UL
 };
 
+# ifndef PEDANTIC
+#  if defined(__GNUC__) && __GNUC__>=2 && \
+      !defined(OPENSSL_NO_ASM) && !defined(OPENSSL_NO_INLINE_ASM)
+#   if defined(__riscv_zknh)
+#    define Sigma0(x) ({ MD32_REG_T ret;            \
+                        asm ("sha256sum0 %0, %1"    \
+                        : "=r"(ret)                 \
+                        : "r"(x)); ret;             })
+#    define Sigma1(x) ({ MD32_REG_T ret;            \
+                        asm ("sha256sum1 %0, %1"    \
+                        : "=r"(ret)                 \
+                        : "r"(x)); ret;             })
+#    define sigma0(x) ({ MD32_REG_T ret;            \
+                        asm ("sha256sig0 %0, %1"    \
+                        : "=r"(ret)                 \
+                        : "r"(x)); ret;             })
+#    define sigma1(x) ({ MD32_REG_T ret;            \
+                        asm ("sha256sig1 %0, %1"    \
+                        : "=r"(ret)                 \
+                        : "r"(x)); ret;             })
+#   endif
+#   if defined(__riscv_zbt) || defined(__riscv_zpn)
+#    define Ch(x,y,z) ({  MD32_REG_T ret;                           \
+                        asm (".insn r4 0x33, 1, 0x3, %0, %2, %1, %3"\
+                        : "=r"(ret)                                 \
+                        : "r"(x), "r"(y), "r"(z)); ret;             })
+#    define Maj(x,y,z) ({ MD32_REG_T ret;                           \
+                        asm (".insn r4 0x33, 1, 0x3, %0, %2, %1, %3"\
+                        : "=r"(ret)                                 \
+                        : "r"(x^z), "r"(y), "r"(x)); ret;           })
+#   endif
+#  endif
+# endif
+
 /*
  * FIPS specification refers to right rotations, while our ROTATE macro
  * is left one. This is why you might notice that rotation coefficients
  * differ from those observed in FIPS document by 32-N...
  */
-# define Sigma0(x)       (ROTATE((x),30) ^ ROTATE((x),19) ^ ROTATE((x),10))
-# define Sigma1(x)       (ROTATE((x),26) ^ ROTATE((x),21) ^ ROTATE((x),7))
-# define sigma0(x)       (ROTATE((x),25) ^ ROTATE((x),14) ^ ((x)>>3))
-# define sigma1(x)       (ROTATE((x),15) ^ ROTATE((x),13) ^ ((x)>>10))
-
-# define Ch(x,y,z)       (((x) & (y)) ^ ((~(x)) & (z)))
-# define Maj(x,y,z)      (((x) & (y)) ^ ((x) & (z)) ^ ((y) & (z)))
+# ifndef Sigma0
+#  define Sigma0(x)       (ROTATE((x),30) ^ ROTATE((x),19) ^ ROTATE((x),10))
+# endif
+# ifndef Sigma1
+#  define Sigma1(x)       (ROTATE((x),26) ^ ROTATE((x),21) ^ ROTATE((x),7))
+# endif
+# ifndef sigma0
+#  define sigma0(x)       (ROTATE((x),25) ^ ROTATE((x),14) ^ ((x)>>3))
+# endif
+# ifndef sigma1
+#  define sigma1(x)       (ROTATE((x),15) ^ ROTATE((x),13) ^ ((x)>>10))
+# endif
+# ifndef Ch
+#  define Ch(x,y,z)       (((x) & (y)) ^ ((~(x)) & (z)))
+# endif
+# ifndef Maj
+#  define Maj(x,y,z)      (((x) & (y)) ^ ((x) & (z)) ^ ((y) & (z)))
+# endif
 
 # ifdef OPENSSL_SMALL_FOOTPRINT
 
@@ -182,7 +225,7 @@ static void sha256_block_data_order(SHA256_CTX *ctx, const void *in,
         h = ctx->h[7];
 
         for (i = 0; i < 16; i++) {
-            HOST_c2l(data, l);
+            (void)HOST_c2l(data, l);
             T1 = X[i] = l;
             T1 += h + Sigma1(e) + Ch(e, f, g) + K256[i];
             T2 = Sigma0(a) + Maj(a, b, c);
@@ -240,19 +283,18 @@ static void sha256_block_data_order(SHA256_CTX *ctx, const void *in,
         T1 = X[(i)&0x0f] += s0 + s1 + X[(i+9)&0x0f];    \
         ROUND_00_15(i,a,b,c,d,e,f,g,h);         } while (0)
 
+#ifdef INCLUDE_C_SHA256
+void sha256_block_data_order_c(SHA256_CTX *ctx, const void *in, size_t num)
+#else
 static void sha256_block_data_order(SHA256_CTX *ctx, const void *in,
                                     size_t num)
+#endif
 {
     unsigned MD32_REG_T a, b, c, d, e, f, g, h, s0, s1, T1;
     SHA_LONG X[16];
     int i;
     const unsigned char *data = in;
-    const union {
-        long one;
-        char little;
-    } is_endian = {
-        1
-    };
+    DECLARE_IS_ENDIAN;
 
     while (num--) {
 
@@ -265,7 +307,7 @@ static void sha256_block_data_order(SHA256_CTX *ctx, const void *in,
         g = ctx->h[6];
         h = ctx->h[7];
 
-        if (!is_endian.little && sizeof(SHA_LONG) == 4
+        if (!IS_LITTLE_ENDIAN && sizeof(SHA_LONG) == 4
             && ((size_t)in % 4) == 0) {
             const SHA_LONG *W = (const SHA_LONG *)data;
 
@@ -306,52 +348,52 @@ static void sha256_block_data_order(SHA256_CTX *ctx, const void *in,
         } else {
             SHA_LONG l;
 
-            HOST_c2l(data, l);
+            (void)HOST_c2l(data, l);
             T1 = X[0] = l;
             ROUND_00_15(0, a, b, c, d, e, f, g, h);
-            HOST_c2l(data, l);
+            (void)HOST_c2l(data, l);
             T1 = X[1] = l;
             ROUND_00_15(1, h, a, b, c, d, e, f, g);
-            HOST_c2l(data, l);
+            (void)HOST_c2l(data, l);
             T1 = X[2] = l;
             ROUND_00_15(2, g, h, a, b, c, d, e, f);
-            HOST_c2l(data, l);
+            (void)HOST_c2l(data, l);
             T1 = X[3] = l;
             ROUND_00_15(3, f, g, h, a, b, c, d, e);
-            HOST_c2l(data, l);
+            (void)HOST_c2l(data, l);
             T1 = X[4] = l;
             ROUND_00_15(4, e, f, g, h, a, b, c, d);
-            HOST_c2l(data, l);
+            (void)HOST_c2l(data, l);
             T1 = X[5] = l;
             ROUND_00_15(5, d, e, f, g, h, a, b, c);
-            HOST_c2l(data, l);
+            (void)HOST_c2l(data, l);
             T1 = X[6] = l;
             ROUND_00_15(6, c, d, e, f, g, h, a, b);
-            HOST_c2l(data, l);
+            (void)HOST_c2l(data, l);
             T1 = X[7] = l;
             ROUND_00_15(7, b, c, d, e, f, g, h, a);
-            HOST_c2l(data, l);
+            (void)HOST_c2l(data, l);
             T1 = X[8] = l;
             ROUND_00_15(8, a, b, c, d, e, f, g, h);
-            HOST_c2l(data, l);
+            (void)HOST_c2l(data, l);
             T1 = X[9] = l;
             ROUND_00_15(9, h, a, b, c, d, e, f, g);
-            HOST_c2l(data, l);
+            (void)HOST_c2l(data, l);
             T1 = X[10] = l;
             ROUND_00_15(10, g, h, a, b, c, d, e, f);
-            HOST_c2l(data, l);
+            (void)HOST_c2l(data, l);
             T1 = X[11] = l;
             ROUND_00_15(11, f, g, h, a, b, c, d, e);
-            HOST_c2l(data, l);
+            (void)HOST_c2l(data, l);
             T1 = X[12] = l;
             ROUND_00_15(12, e, f, g, h, a, b, c, d);
-            HOST_c2l(data, l);
+            (void)HOST_c2l(data, l);
             T1 = X[13] = l;
             ROUND_00_15(13, d, e, f, g, h, a, b, c);
-            HOST_c2l(data, l);
+            (void)HOST_c2l(data, l);
             T1 = X[14] = l;
             ROUND_00_15(14, c, d, e, f, g, h, a, b);
-            HOST_c2l(data, l);
+            (void)HOST_c2l(data, l);
             T1 = X[15] = l;
             ROUND_00_15(15, b, c, d, e, f, g, h, a);
         }

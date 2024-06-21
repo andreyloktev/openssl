@@ -1,70 +1,20 @@
-/* v3_ocsp.c */
 /*
- * Written by Dr Stephen N Henson (steve@openssl.org) for the OpenSSL project
- * 1999.
- */
-/* ====================================================================
- * Copyright (c) 1999 The OpenSSL Project.  All rights reserved.
+ * Copyright 2000-2021 The OpenSSL Project Authors. All Rights Reserved.
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- *
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer.
- *
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in
- *    the documentation and/or other materials provided with the
- *    distribution.
- *
- * 3. All advertising materials mentioning features or use of this
- *    software must display the following acknowledgment:
- *    "This product includes software developed by the OpenSSL Project
- *    for use in the OpenSSL Toolkit. (http://www.OpenSSL.org/)"
- *
- * 4. The names "OpenSSL Toolkit" and "OpenSSL Project" must not be used to
- *    endorse or promote products derived from this software without
- *    prior written permission. For written permission, please contact
- *    licensing@OpenSSL.org.
- *
- * 5. Products derived from this software may not be called "OpenSSL"
- *    nor may "OpenSSL" appear in their names without prior written
- *    permission of the OpenSSL Project.
- *
- * 6. Redistributions of any form whatsoever must retain the following
- *    acknowledgment:
- *    "This product includes software developed by the OpenSSL Project
- *    for use in the OpenSSL Toolkit (http://www.OpenSSL.org/)"
- *
- * THIS SOFTWARE IS PROVIDED BY THE OpenSSL PROJECT ``AS IS'' AND ANY
- * EXPRESSED OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
- * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE OpenSSL PROJECT OR
- * ITS CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
- * NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
- * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
- * STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED
- * OF THE POSSIBILITY OF SUCH DAMAGE.
- * ====================================================================
- *
- * This product includes cryptographic software written by Eric Young
- * (eay@cryptsoft.com).  This product includes software written by Tim
- * Hudson (tjh@cryptsoft.com).
- *
+ * Licensed under the Apache License 2.0 (the "License").  You may not use
+ * this file except in compliance with the License.  You can obtain a copy
+ * in the file LICENSE in the source distribution or at
+ * https://www.openssl.org/source/license.html
  */
 
-# include <stdio.h>
-# include "internal/cryptlib.h"
-# include <openssl/conf.h>
-# include <openssl/asn1.h>
-# include <openssl/ocsp.h>
-# include "ocsp_lcl.h"
-# include <openssl/x509v3.h>
-# include "../x509v3/ext_dat.h"
+#include <stdio.h>
+#include "internal/cryptlib.h"
+#include <openssl/conf.h>
+#include <openssl/asn1.h>
+#include <openssl/ocsp.h>
+#include "ocsp_local.h"
+#include <openssl/x509v3.h>
+#include "../x509/ext_dat.h"
 
 /*
  * OCSP extensions and a couple of CRL entry extensions
@@ -78,7 +28,7 @@ static int i2r_object(const X509V3_EXT_METHOD *method, void *obj, BIO *out,
                       int indent);
 
 static void *ocsp_nonce_new(void);
-static int i2d_ocsp_nonce(void *a, unsigned char **pp);
+static int i2d_ocsp_nonce(const void *a, unsigned char **pp);
 static void *d2i_ocsp_nonce(void *a, const unsigned char **pp, long length);
 static void ocsp_nonce_free(void *a);
 static int i2r_ocsp_nonce(const X509V3_EXT_METHOD *method, void *nonce,
@@ -91,7 +41,7 @@ static void *s2i_ocsp_nocheck(const X509V3_EXT_METHOD *method,
 static int i2r_ocsp_serviceloc(const X509V3_EXT_METHOD *method, void *in,
                                BIO *bp, int ind);
 
-const X509V3_EXT_METHOD v3_ocsp_crlid = {
+const X509V3_EXT_METHOD ossl_v3_ocsp_crlid = {
     NID_id_pkix_OCSP_CrlID, 0, ASN1_ITEM_ref(OCSP_CRLID),
     0, 0, 0, 0,
     0, 0,
@@ -100,7 +50,7 @@ const X509V3_EXT_METHOD v3_ocsp_crlid = {
     NULL
 };
 
-const X509V3_EXT_METHOD v3_ocsp_acutoff = {
+const X509V3_EXT_METHOD ossl_v3_ocsp_acutoff = {
     NID_id_pkix_OCSP_archiveCutoff, 0, ASN1_ITEM_ref(ASN1_GENERALIZEDTIME),
     0, 0, 0, 0,
     0, 0,
@@ -109,7 +59,7 @@ const X509V3_EXT_METHOD v3_ocsp_acutoff = {
     NULL
 };
 
-const X509V3_EXT_METHOD v3_crl_invdate = {
+const X509V3_EXT_METHOD ossl_v3_crl_invdate = {
     NID_invalidity_date, 0, ASN1_ITEM_ref(ASN1_GENERALIZEDTIME),
     0, 0, 0, 0,
     0, 0,
@@ -118,7 +68,7 @@ const X509V3_EXT_METHOD v3_crl_invdate = {
     NULL
 };
 
-const X509V3_EXT_METHOD v3_crl_hold = {
+const X509V3_EXT_METHOD ossl_v3_crl_hold = {
     NID_hold_instruction_code, 0, ASN1_ITEM_ref(ASN1_OBJECT),
     0, 0, 0, 0,
     0, 0,
@@ -127,7 +77,7 @@ const X509V3_EXT_METHOD v3_crl_hold = {
     NULL
 };
 
-const X509V3_EXT_METHOD v3_ocsp_nonce = {
+const X509V3_EXT_METHOD ossl_v3_ocsp_nonce = {
     NID_id_pkix_OCSP_Nonce, 0, NULL,
     ocsp_nonce_new,
     ocsp_nonce_free,
@@ -139,7 +89,7 @@ const X509V3_EXT_METHOD v3_ocsp_nonce = {
     NULL
 };
 
-const X509V3_EXT_METHOD v3_ocsp_nocheck = {
+const X509V3_EXT_METHOD ossl_v3_ocsp_nocheck = {
     NID_id_pkix_OCSP_noCheck, 0, ASN1_ITEM_ref(ASN1_NULL),
     0, 0, 0, 0,
     0, s2i_ocsp_nocheck,
@@ -148,7 +98,7 @@ const X509V3_EXT_METHOD v3_ocsp_nocheck = {
     NULL
 };
 
-const X509V3_EXT_METHOD v3_ocsp_serviceloc = {
+const X509V3_EXT_METHOD ossl_v3_ocsp_serviceloc = {
     NID_id_pkix_OCSP_serviceLocator, 0, ASN1_ITEM_ref(OCSP_SERVICELOC),
     0, 0, 0, 0,
     0, 0,
@@ -220,9 +170,9 @@ static void *ocsp_nonce_new(void)
     return ASN1_OCTET_STRING_new();
 }
 
-static int i2d_ocsp_nonce(void *a, unsigned char **pp)
+static int i2d_ocsp_nonce(const void *a, unsigned char **pp)
 {
-    ASN1_OCTET_STRING *os = a;
+    const ASN1_OCTET_STRING *os = a;
     if (pp) {
         memcpy(*pp, os->data, os->length);
         *pp += os->length;
@@ -253,7 +203,7 @@ static void *d2i_ocsp_nonce(void *a, const unsigned char **pp, long length)
  err:
     if ((pos == NULL) || (*pos != os))
         ASN1_OCTET_STRING_free(os);
-    OCSPerr(OCSP_F_D2I_OCSP_NONCE, ERR_R_MALLOC_FAILURE);
+    ERR_raise(ERR_LIB_OCSP, ERR_R_ASN1_LIB);
     return NULL;
 }
 
